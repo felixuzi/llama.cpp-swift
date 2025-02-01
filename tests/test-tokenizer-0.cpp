@@ -7,7 +7,6 @@
 #include <map>
 #include <vector>
 #include <fstream>
-#include <thread>
 
 //static const std::map<std::string, std::vector<llama_token>> & k_tests() {
 //    static std::map<std::string, std::vector<llama_token>> _k_tests = {
@@ -56,10 +55,8 @@
 //    return _k_tests;
 //}
 
-using llama_tests = std::map<std::string, std::vector<llama_token>>;
-
-static llama_tests read_tests(const std::string & fname_inp, const std::string & fname_out) {
-    llama_tests tests;
+static std::map<std::string, std::vector<llama_token>> read_tests(const std::string & fname_inp, const std::string & fname_out) {
+    std::map<std::string, std::vector<llama_token>> tests;
 
     std::ifstream ifs_inp(fname_inp);
     if (!ifs_inp) {
@@ -152,7 +149,7 @@ int main(int argc, char **argv) {
 
         mparams.vocab_only = true;
 
-        model = llama_model_load_from_file(fname.c_str(), mparams);
+        model = llama_load_model_from_file(fname.c_str(), mparams);
 
         if (model == NULL) {
             fprintf(stderr, "%s: error: failed to load vocab '%s'\n", __func__, fname.c_str());
@@ -161,11 +158,11 @@ int main(int argc, char **argv) {
 
         auto cparams = llama_context_default_params();
 
-        ctx = llama_init_from_model(model, cparams);
+        ctx = llama_new_context_with_model(model, cparams);
 
         if (ctx == NULL) {
             fprintf(stderr, "%s: error: failed to load vocab '%s'\n", __func__, fname.c_str());
-            llama_model_free(model);
+            llama_free_model(model);
             return 1;
         }
     }
@@ -178,81 +175,54 @@ int main(int argc, char **argv) {
 
     bool success = true;
 
-    const auto k_tests = [&]() -> llama_tests {
-        if (!fname_text.empty()) {
-            return {};
-        }
+    const auto k_tests = read_tests(fname_inp, fname_out);
 
-        const auto res = read_tests(fname_inp, fname_out);
-
-        if (res.empty()) {
-            fprintf(stderr, "%s : error: no tests found\n", __func__);
-            exit(1);
-        }
-
-        return res;
-    }();
+    if (k_tests.empty()) {
+        fprintf(stderr, "%s : error: no tests found\n", __func__);
+        return 1;
+    }
 
     const bool add_special = false;
 
-    // multi-threaded tokenization
-    const int nthread = std::thread::hardware_concurrency();
-    std::vector<std::thread> threads(nthread);
+    for (const auto & test_kv : k_tests) {
+        const std::vector<llama_token> res = llama_tokenize(ctx, test_kv.first, add_special);
 
-    for (int i = 0; i < nthread; i++) {
-        threads[i] = std::thread([&, i]() {
-            for (const auto & test_kv : k_tests) {
-                const std::vector<llama_token> res = common_tokenize(ctx, test_kv.first, add_special, false);
+        printf("\n");
+        printf("src: '%s'\n", test_kv.first.c_str());
+        printf("res: '%s'\n", llama_detokenize_bpe(ctx, res).c_str());
+        printf("tok: ");
+        for (const auto & tok : res) {
+            printf("%d ", tok);
+        }
+        printf("\n");
 
-                // here only print the result of the first thread
-                // because the other threads are running the same tests
-                if (i != 0) {
-                    continue;
-                }
-
-                printf("\n");
-                printf("src: '%s'\n", test_kv.first.c_str());
-                printf("res: '%s'\n", common_detokenize(ctx, res).c_str());
-                printf("tok: ");
-                for (const auto & tok : res) {
-                    printf("%d ", tok);
-                }
-                printf("\n");
-
-                bool correct = res.size() == test_kv.second.size();
-                for (int i = 0; i < (int) res.size() && correct; ++i) {
-                    if (test_kv.second[i] != res[i]) {
-                        correct = false;
-                    }
-                }
-
-                if (!correct) {
-                    fprintf(stderr, "%s : failed test:    '%s'\n", __func__, test_kv.first.c_str());
-                    fprintf(stderr, "%s : detokenized to: '%s' instead of '%s'\n", __func__,
-                        common_detokenize(ctx, res).c_str(),
-                        common_detokenize(ctx, test_kv.second).c_str());
-                    fprintf(stderr, "%s : expected tokens: ", __func__);
-                    for (const auto & t : test_kv.second) {
-                        fprintf(stderr, "%6d '%s', ", t, common_token_to_piece(ctx, t).c_str());
-                    }
-                    fprintf(stderr, "\n");
-                    fprintf(stderr, "%s : got tokens:      ", __func__);
-                    for (const auto & t : res) {
-                        fprintf(stderr, "%6d '%s', ", t, common_token_to_piece(ctx, t).c_str());
-                    }
-                    fprintf(stderr, "\n");
-
-                    success = false;
-                }
+        bool correct = res.size() == test_kv.second.size();
+        for (int i = 0; i < (int) res.size() && correct; ++i) {
+            if (test_kv.second[i] != res[i]) {
+                correct = false;
             }
-        });
+        }
+
+        if (!correct) {
+            fprintf(stderr, "%s : failed test:    '%s'\n", __func__, test_kv.first.c_str());
+            fprintf(stderr, "%s : detokenized to: '%s' instead of '%s'\n", __func__,
+                llama_detokenize_bpe(ctx, res).c_str(),
+                llama_detokenize_bpe(ctx, test_kv.second).c_str());
+            fprintf(stderr, "%s : expected tokens: ", __func__);
+            for (const auto & t : test_kv.second) {
+                fprintf(stderr, "%6d '%s', ", t, llama_token_to_piece(ctx, t).c_str());
+            }
+            fprintf(stderr, "\n");
+            fprintf(stderr, "%s : got tokens:      ", __func__);
+            for (const auto & t : res) {
+                fprintf(stderr, "%6d '%s', ", t, llama_token_to_piece(ctx, t).c_str());
+            }
+            fprintf(stderr, "\n");
+
+            success = false;
+        }
     }
 
-    for (int i = 0; i < nthread; i++) {
-        threads[i].join();
-    }
-
-    // single threaded tokenization
     if (!fname_text.empty()) {
         fprintf(stderr, "%s : tokenizing: '%s'\n", __func__, fname_text.c_str());
 
@@ -268,17 +238,7 @@ int main(int argc, char **argv) {
 
         fprintf(stderr, "%s : text size: %zu\n", __func__, text.size());
 
-        std::vector<llama_token> res;
-
-        {
-            const auto t_start = ggml_time_us();
-
-            res = common_tokenize(ctx, text, add_special, false);
-
-            const auto t_end = ggml_time_us();
-
-            fprintf(stderr, "%s : tokenized in %.3f ms (cpp)\n", __func__, (t_end - t_start) / 1000.0);
-        }
+        const std::vector<llama_token> res = llama_tokenize(ctx, text, add_special);
 
         fprintf(stderr, "%s : tokens: %zu\n", __func__, res.size());
 
@@ -292,15 +252,14 @@ int main(int argc, char **argv) {
             }
 
             for (const auto & tok : res) {
-                //ofs << tok << " '" << string_strip(llama_detokenize(ctx, std::vector<int>{tok})) << "'" << std::endl;
-                ofs << tok << "\n";
+                ofs << tok << " '" << string_strip(llama_detokenize_bpe(ctx, std::vector<int>{tok})) << "'" << std::endl;
             }
         }
 
         fprintf(stderr, "%s : tokens written to '%s'\n", __func__, (fname_text + ".tokcpp").c_str());
     }
 
-    llama_model_free(model);
+    llama_free_model(model);
     llama_free(ctx);
 
     llama_backend_free();

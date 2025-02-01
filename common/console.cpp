@@ -1,4 +1,4 @@
-#include "console.h"
+#include <llama/console.h>
 #include <vector>
 #include <iostream>
 
@@ -93,9 +93,6 @@ namespace console {
             if (!SetConsoleMode(hConIn, dwMode)) {
                 simple_io = true;
             }
-        }
-        if (simple_io) {
-            _setmode(_fileno(stdin), _O_U8TEXT);
         }
 #else
         // POSIX-specific console initialization

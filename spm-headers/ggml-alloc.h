@@ -1,1 +1,1 @@
-../ggml/include/ggml-alloc.h
+../ggml-alloc.h

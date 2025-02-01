@@ -24,15 +24,13 @@ func llama_batch_add(_ batch: inout llama_batch, _ id: llama_token, _ pos: llama
 actor LlamaContext {
     private var model: OpaquePointer
     private var context: OpaquePointer
-    private var sampling: UnsafeMutablePointer<llama_sampler>
     private var batch: llama_batch
     private var tokens_list: [llama_token]
-    var is_done: Bool = false
 
     /// This variable is used to store temporarily invalid cchars
     private var temporary_invalid_cchars: [CChar]
 
-    var n_len: Int32 = 1024
+    var n_len: Int32 = 64
     var n_cur: Int32 = 0
 
     var n_decode: Int32 = 0
@@ -43,17 +41,12 @@ actor LlamaContext {
         self.tokens_list = []
         self.batch = llama_batch_init(512, 0, 1)
         self.temporary_invalid_cchars = []
-        let sparams = llama_sampler_chain_default_params()
-        self.sampling = llama_sampler_chain_init(sparams)
-        llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
-        llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
     }
 
     deinit {
-        llama_sampler_free(sampling)
         llama_batch_free(batch)
-        llama_model_free(model)
         llama_free(context)
+        llama_free_model(model)
         llama_backend_free()
     }
 
@@ -65,7 +58,7 @@ actor LlamaContext {
         model_params.n_gpu_layers = 0
         print("Running on simulator, force use n_gpu_layers = 0")
 #endif
-        let model = llama_model_load_from_file(path, model_params)
+        let model = llama_load_model_from_file(path, model_params)
         guard let model else {
             print("Could not load model at \(path)")
             throw LlamaError.couldNotInitializeContext
@@ -75,9 +68,10 @@ actor LlamaContext {
         print("Using \(n_threads) threads")
 
         var ctx_params = llama_context_default_params()
+        ctx_params.seed  = 1234
         ctx_params.n_ctx = 2048
-        ctx_params.n_threads       = Int32(n_threads)
-        ctx_params.n_threads_batch = Int32(n_threads)
+        ctx_params.n_threads       = UInt32(n_threads)
+        ctx_params.n_threads_batch = UInt32(n_threads)
 
         let context = llama_new_context_with_model(model, ctx_params)
         guard let context else {
@@ -149,11 +143,23 @@ actor LlamaContext {
     func completion_loop() -> String {
         var new_token_id: llama_token = 0
 
-        new_token_id = llama_sampler_sample(sampling, context, batch.n_tokens - 1)
+        let n_vocab = llama_n_vocab(model)
+        let logits = llama_get_logits_ith(context, batch.n_tokens - 1)
 
-        if llama_vocab_is_eog(model, new_token_id) || n_cur == n_len {
+        var candidates = Array<llama_token_data>()
+        candidates.reserveCapacity(Int(n_vocab))
+
+        for token_id in 0..<n_vocab {
+            candidates.append(llama_token_data(id: token_id, logit: logits![Int(token_id)], p: 0.0))
+        }
+        candidates.withUnsafeMutableBufferPointer() { buffer in
+            var candidates_p = llama_token_data_array(data: buffer.baseAddress, size: buffer.count, sorted: false)
+
+            new_token_id = llama_sample_token_greedy(context, &candidates_p)
+        }
+
+        if llama_token_is_eog(model, new_token_id) || n_cur == n_len {
             print("\n")
-            is_done = true
             let new_token_str = String(cString: temporary_invalid_cchars + [0])
             temporary_invalid_cchars.removeAll()
             return new_token_str
@@ -210,20 +216,20 @@ actor LlamaContext {
 
             llama_kv_cache_clear(context)
 
-            let t_pp_start = DispatchTime.now().uptimeNanoseconds / 1000;
+            let t_pp_start = ggml_time_us()
 
             if llama_decode(context, batch) != 0 {
                 print("llama_decode() failed during prompt")
             }
             llama_synchronize(context)
 
-            let t_pp_end = DispatchTime.now().uptimeNanoseconds / 1000;
+            let t_pp_end = ggml_time_us()
 
             // bench text generation
 
             llama_kv_cache_clear(context)
 
-            let t_tg_start = DispatchTime.now().uptimeNanoseconds / 1000;
+            let t_tg_start = ggml_time_us()
 
             for i in 0..<tg {
                 llama_batch_clear(&batch)
@@ -238,7 +244,7 @@ actor LlamaContext {
                 llama_synchronize(context)
             }
 
-            let t_tg_end = DispatchTime.now().uptimeNanoseconds / 1000;
+            let t_tg_end = ggml_time_us()
 
             llama_kv_cache_clear(context)
 
@@ -316,7 +322,7 @@ actor LlamaContext {
         defer {
             result.deallocate()
         }
-        let nTokens = llama_token_to_piece(model, token, result, 8, 0, false)
+        let nTokens = llama_token_to_piece(model, token, result, 8, false)
 
         if nTokens < 0 {
             let newResult = UnsafeMutablePointer<Int8>.allocate(capacity: Int(-nTokens))
@@ -324,7 +330,7 @@ actor LlamaContext {
             defer {
                 newResult.deallocate()
             }
-            let nNewTokens = llama_token_to_piece(model, token, newResult, -nTokens, 0, false)
+            let nNewTokens = llama_token_to_piece(model, token, newResult, -nTokens, false)
             let bufferPointer = UnsafeBufferPointer(start: newResult, count: Int(nNewTokens))
             return Array(bufferPointer)
         } else {

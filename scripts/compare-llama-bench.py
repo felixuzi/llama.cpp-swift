@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import logging
 import argparse
 import heapq
 import sys
@@ -12,29 +11,27 @@ try:
     import git
     from tabulate import tabulate
 except ImportError as e:
-    print("the following Python libraries are required: GitPython, tabulate.") # noqa: NP100
+    print("ERROR: the following Python libraries are required: GitPython, tabulate.")
     raise e
-
-logger = logging.getLogger("compare-llama-bench")
 
 # Properties by which to differentiate results per commit:
 KEY_PROPERTIES = [
-    "cpu_info", "gpu_info", "backends", "n_gpu_layers", "model_filename", "model_type", "n_batch", "n_ubatch",
-    "embeddings", "cpu_mask", "cpu_strict", "poll", "n_threads", "type_k", "type_v", "use_mmap", "no_kv_offload",
-    "split_mode", "main_gpu", "tensor_split", "flash_attn", "n_prompt", "n_gen"
+    "cpu_info", "gpu_info", "n_gpu_layers", "main_gpu", "cuda", "opencl", "metal", "gpu_blas",
+    "blas", "model_filename", "model_type", "model_size", "model_n_params", "n_batch", "n_threads",
+    "type_k", "type_v", "no_kv_offload", "tensor_split", "n_prompt", "n_gen"
 ]
 
 # Properties that are boolean and are converted to Yes/No for the table:
-BOOL_PROPERTIES = ["embeddings", "cpu_strict", "use_mmap", "no_kv_offload", "flash_attn"]
+BOOL_PROPERTIES = ["cuda", "opencl", "metal", "gpu_blas", "blas"]
 
 # Header names for the table:
 PRETTY_NAMES = {
-    "cpu_info": "CPU", "gpu_info": "GPU", "backends": "Backends", "n_gpu_layers": "GPU layers",
-    "model_filename": "File", "model_type": "Model", "model_size": "Model size [GiB]",
-    "model_n_params": "Num. of par.", "n_batch": "Batch size", "n_ubatch": "Microbatch size",
-    "embeddings": "Embeddings", "cpu_mask": "CPU mask", "cpu_strict": "CPU strict", "poll": "Poll",
-    "n_threads": "Threads", "type_k": "K type", "type_v": "V type", "split_mode": "Split mode", "main_gpu": "Main GPU",
-    "no_kv_offload": "NKVO", "flash_attn": "FlashAttention", "tensor_split": "Tensor split", "use_mmap": "Use mmap",
+    "cuda": "CUDA", "opencl": "OpenCL", "metal": "Metal", "gpu_blas": "GPU BLAS", "blas": "BLAS",
+    "cpu_info": "CPU", "gpu_info": "GPU", "model_filename": "File", "model_type": "Model",
+    "model_size": "Model Size [GiB]", "model_n_params": "Num. of Parameters",
+    "n_batch": "Batch size", "n_threads": "Threads", "type_k": "K type", "type_v": "V type",
+    "n_gpu_layers": "GPU layers", "main_gpu": "Main GPU", "no_kv_offload": "NKVO",
+    "tensor_split": "Tensor split"
 }
 
 DEFAULT_SHOW = ["model_type"]  # Always show these properties by default.
@@ -92,20 +89,13 @@ help_s = (
     "If the columns are manually specified, then the results for each unique combination of the "
     "specified values are averaged WITHOUT weighing by the --repetitions parameter of llama-bench."
 )
-parser.add_argument("--check", action="store_true", help="check if all required Python libraries are installed")
 parser.add_argument("-s", "--show", help=help_s)
-parser.add_argument("--verbose", action="store_true", help="increase output verbosity")
 
 known_args, unknown_args = parser.parse_known_args()
 
-logging.basicConfig(level=logging.DEBUG if known_args.verbose else logging.INFO)
-
-if known_args.check:
-    # Check if all required Python libraries are installed. Would have failed earlier if not.
-    sys.exit(0)
-
 if unknown_args:
-    logger.error(f"Received unknown args: {unknown_args}.\n")
+    print(f"ERROR: Received unknown args: {unknown_args}.")
+    print()
     parser.print_help()
     sys.exit(1)
 
@@ -118,7 +108,8 @@ if input_file is None:
         input_file = sqlite_files[0]
 
 if input_file is None:
-    logger.error("Cannot find a suitable input file, please provide one.\n")
+    print("ERROR: Cannot find a suitable input file, please provide one.")
+    print()
     parser.print_help()
     sys.exit(1)
 
@@ -126,41 +117,39 @@ connection = sqlite3.connect(input_file)
 cursor = connection.cursor()
 builds = cursor.execute("SELECT DISTINCT build_commit FROM test;").fetchall()
 
-commit_short_len = len(builds[0][0])
-
 try:
     repo = git.Repo(".", search_parent_directories=True)
-except git.InvalidGitRepositoryError:
+except git.exc.InvalidGitRepositoryError:
     repo = None
 
 
-def find_parent_in_data(commit: git.Commit):
+def find_parent_in_data(commit):
     """Helper function to find the most recent parent measured in number of commits for which there is data."""
-    heap: list[tuple[int, git.Commit]] = [(0, commit)]
+    heap = [(0, commit)]
     seen_hexsha8 = set()
     while heap:
         depth, current_commit = heapq.heappop(heap)
-        current_hexsha8 = commit.hexsha[:commit_short_len]
+        current_hexsha8 = commit.hexsha[:8]
         if (current_hexsha8,) in builds:
             return current_hexsha8
         for parent in commit.parents:
-            parent_hexsha8 = parent.hexsha[:commit_short_len]
+            parent_hexsha8 = parent.hexsha[:8]
             if parent_hexsha8 not in seen_hexsha8:
                 seen_hexsha8.add(parent_hexsha8)
                 heapq.heappush(heap, (depth + 1, parent))
     return None
 
 
-def get_all_parent_hexsha8s(commit: git.Commit):
+def get_all_parent_hexsha8s(commit):
     """Helper function to recursively get hexsha8 values for all parents of a commit."""
     unvisited = [commit]
     visited   = []
 
     while unvisited:
         current_commit = unvisited.pop(0)
-        visited.append(current_commit.hexsha[:commit_short_len])
+        visited.append(current_commit.hexsha[:8])
         for parent in current_commit.parents:
-            if parent.hexsha[:commit_short_len] not in visited:
+            if parent.hexsha[:8] not in visited:
                 unvisited.append(parent)
 
     return visited
@@ -171,10 +160,10 @@ def get_commit_name(hexsha8):
     if repo is None:
         return hexsha8
     for h in repo.heads:
-        if h.commit.hexsha[:commit_short_len] == hexsha8:
+        if h.commit.hexsha[:8] == hexsha8:
             return h.name
     for t in repo.tags:
-        if t.commit.hexsha[:commit_short_len] == hexsha8:
+        if t.commit.hexsha[:8] == hexsha8:
             return t.name
     return hexsha8
 
@@ -185,13 +174,13 @@ def get_commit_hexsha8(name):
         return None
     for h in repo.heads:
         if h.name == name:
-            return h.commit.hexsha[:commit_short_len]
+            return h.commit.hexsha[:8]
     for t in repo.tags:
         if t.name == name:
-            return t.commit.hexsha[:commit_short_len]
+            return t.commit.hexsha[:8]
     for c in repo.iter_commits("--all"):
-        if c.hexsha[:commit_short_len] == name[:commit_short_len]:
-            return c.hexsha[:commit_short_len]
+        if c.hexsha[:8] == name[:8]:
+            return c.hexsha[:8]
     return None
 
 
@@ -205,19 +194,23 @@ if known_args.baseline is not None:
         hexsha8_baseline = get_commit_hexsha8(known_args.baseline)
         name_baseline = known_args.baseline
     if hexsha8_baseline is None:
-        logger.error(f"cannot find data for baseline={known_args.baseline}.")
+        print(f"ERROR: cannot find data for baseline={known_args.baseline}.")
         sys.exit(1)
 # Otherwise, search for the most recent parent of master for which there is data:
 elif repo is not None:
     hexsha8_baseline = find_parent_in_data(repo.heads.master.commit)
 
     if hexsha8_baseline is None:
-        logger.error("No baseline was provided and did not find data for any master branch commits.\n")
+        print("ERROR: No baseline was provided and did not find data for any master branch commits.")
+        print()
         parser.print_help()
         sys.exit(1)
 else:
-    logger.error("No baseline was provided and the current working directory "
-                 "is not part of a git repository from which a baseline could be inferred.\n")
+    print(
+        "ERROR: No baseline was provided and the current working directory "
+        "is not part of a git repository from which a baseline could be inferred."
+    )
+    print()
     parser.print_help()
     sys.exit(1)
 
@@ -234,7 +227,7 @@ if known_args.compare is not None:
         hexsha8_compare = get_commit_hexsha8(known_args.compare)
         name_compare = known_args.compare
     if hexsha8_compare is None:
-        logger.error(f"cannot find data for compare={known_args.compare}.")
+        print(f"ERROR: cannot find data for compare={known_args.compare}.")
         sys.exit(1)
 # Otherwise, search for the commit for llama-bench was most recently run
 # and that is not a parent of master:
@@ -248,12 +241,16 @@ elif repo is not None:
             break
 
     if hexsha8_compare is None:
-        logger.error("No compare target was provided and did not find data for any non-master commits.\n")
+        print("ERROR: No compare target was provided and did not find data for any non-master commits.")
+        print()
         parser.print_help()
         sys.exit(1)
 else:
-    logger.error("No compare target was provided and the current working directory "
-                 "is not part of a git repository from which a compare target could be inferred.\n")
+    print(
+        "ERROR: No compare target was provided and the current working directory "
+        "is not part of a git repository from which a compare target could be inferred."
+    )
+    print()
     parser.print_help()
     sys.exit(1)
 
@@ -287,7 +284,8 @@ if known_args.show is not None:
         if prop not in KEY_PROPERTIES[:-2]:  # Last two values are n_prompt, n_gen.
             unknown_cols.append(prop)
     if unknown_cols:
-        logger.error(f"Unknown values for --show: {', '.join(unknown_cols)}")
+        print(f"ERROR: Unknown values for --show: {', '.join(unknown_cols)}")
+        print()
         parser.print_usage()
         sys.exit(1)
     rows_show = get_rows(show)
@@ -305,11 +303,14 @@ else:
 
     show = []
     # Show CPU and/or GPU by default even if the hardware for all results is the same:
-    if "n_gpu_layers" not in properties_different:
+    if "gpu_blas" not in properties_different and "n_gpu_layers" not in properties_different:
+        gpu_blas = bool(rows_full[0][KEY_PROPERTIES.index("gpu_blas")])
         ngl = int(rows_full[0][KEY_PROPERTIES.index("n_gpu_layers")])
 
-        if ngl != 99 and "cpu_info" not in properties_different:
+        if not gpu_blas or ngl != 99 and "cpu_info" not in properties_different:
             show.append("cpu_info")
+        if gpu_blas and "gpu_info" not in properties_different:
+            show.append("gpu_info")
 
     show += properties_different
 
@@ -329,12 +330,8 @@ table = []
 for row in rows_show:
     n_prompt = int(row[-4])
     n_gen    = int(row[-3])
-    if n_prompt != 0 and n_gen == 0:
-        test_name = f"pp{n_prompt}"
-    elif n_prompt == 0 and n_gen != 0:
-        test_name = f"tg{n_gen}"
-    else:
-        test_name = f"pp{n_prompt}+tg{n_gen}"
+    assert n_prompt == 0 or n_gen == 0
+    test_name = f"tg{n_gen}" if n_prompt == 0 else f"pp{n_prompt}"
     #           Regular columns    test name    avg t/s values              Speedup
     #            VVVVVVVVVVVVV     VVVVVVVVV    VVVVVVVVVVVVVV              VVVVVVV
     table.append(list(row[:-4]) + [test_name] + list(row[-2:]) + [float(row[-1]) / float(row[-2])])
@@ -372,7 +369,7 @@ if "gpu_info" in show:
 headers  = [PRETTY_NAMES[p] for p in show]
 headers += ["Test", f"t/s {name_baseline}", f"t/s {name_compare}", "Speedup"]
 
-print(tabulate( # noqa: NP100
+print(tabulate(
     table,
     headers=headers,
     floatfmt=".2f",

@@ -6,10 +6,10 @@ Benchmark is using [k6](https://k6.io/).
 
 SSE is not supported by default in k6, you have to build k6 with the [xk6-sse](https://github.com/phymbert/xk6-sse) extension.
 
-Example (assuming golang >= 1.21 is installed):
+Example:
 ```shell
 go install go.k6.io/xk6/cmd/xk6@latest
-$GOPATH/bin/xk6 build master \
+xk6 build master \
 --with github.com/phymbert/xk6-sse
 ```
 
@@ -33,13 +33,14 @@ The server must answer OAI Chat completion requests on `http://localhost:8080/v1
 
 Example:
 ```shell
-llama-server --host localhost --port 8080 \
+server --host localhost --port 8080 \
   --model ggml-model-q4_0.gguf \
   --cont-batching \
   --metrics \
   --parallel 8 \
   --batch-size 512 \
   --ctx-size 4096 \
+  --log-format text \
   -ngl 33
 ```
 
@@ -98,7 +99,7 @@ The `bench.py` script does several steps:
 It aims to be used in the CI, but you can run it manually:
 
 ```shell
-LLAMA_SERVER_BIN_PATH=../../../cmake-build-release/bin/llama-server python bench.py \
+LLAMA_SERVER_BIN_PATH=../../../cmake-build-release/bin/server python bench.py \
               --runner-label local \
               --name local \
               --branch `git rev-parse --abbrev-ref HEAD` \

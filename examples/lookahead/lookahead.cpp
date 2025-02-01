@@ -1,9 +1,7 @@
-#include "arg.h"
 #include "common.h"
-#include "sampling.h"
-#include "log.h"
 #include "llama.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -37,13 +35,11 @@ struct ngram_container {
 };
 
 int main(int argc, char ** argv) {
-    common_params params;
+    gpt_params params;
 
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMMON)) {
+    if (gpt_params_parse(argc, argv, params) == false) {
         return 1;
     }
-
-    common_init();
 
     const int W = 15; // lookahead window
     const int N = 5;  // n-gram size
@@ -51,37 +47,41 @@ int main(int argc, char ** argv) {
 
     const bool dump_kv_cache = params.dump_kv_cache;
 
+#ifndef LOG_DISABLE_LOGS
+    log_set_target(log_filename_generator("lookahead", "log"));
+    LOG_TEE("Log start\n");
+    log_dump_cmdline(argc, argv);
+#endif // LOG_DISABLE_LOGS
+
     // init llama.cpp
     llama_backend_init();
     llama_numa_init(params.numa);
 
+    llama_model * model = NULL;
+    llama_context * ctx = NULL;
+
     // load the target model
-    common_init_result llama_init = common_init_from_params(params);
-
-    llama_model * model = llama_init.model.get();
-    llama_context * ctx = llama_init.context.get();
-
-    const llama_vocab * vocab = llama_model_get_vocab(model);
+    std::tie(model, ctx) = llama_init_from_gpt_params(params);
 
     // Tokenize the prompt
     std::vector<llama_token> inp;
     std::vector<llama_token> all;
 
-    inp = common_tokenize(ctx, params.prompt, true, true);
+    inp = ::llama_tokenize(ctx, params.prompt, true, true);
     all = inp;
 
     const int max_context_size     = llama_n_ctx(ctx);
     const int max_tokens_list_size = max_context_size - 4;
 
     if ((int) inp.size() > max_tokens_list_size) {
-        LOG_ERR("%s: prompt too long (%d tokens, max %d)\n", __func__, (int) inp.size(), max_tokens_list_size);
+        fprintf(stderr, "%s: error: prompt too long (%d tokens, max %d)\n", __func__, (int) inp.size(), max_tokens_list_size);
         return 1;
     }
 
-    LOG("\n\n");
+    fprintf(stderr, "\n\n");
 
     for (auto id : inp) {
-        LOG("%s", common_token_to_piece(ctx, id).c_str());
+        fprintf(stderr, "%s", llama_token_to_piece(ctx, id).c_str());
     }
 
     fflush(stderr);
@@ -91,8 +91,8 @@ int main(int argc, char ** argv) {
     const auto t_enc_start = ggml_time_us();
 
     // eval the prompt
-    llama_decode(ctx, llama_batch_get_one( inp.data(), n_input - 1));
-    llama_decode(ctx, llama_batch_get_one(&inp.back(),           1));
+    llama_decode(ctx, llama_batch_get_one( inp.data(), n_input - 1, 0,           0));
+    llama_decode(ctx, llama_batch_get_one(&inp.back(),           1, n_input - 1, 0));
 
     for (int s = 1; s < W + G + 1; ++s) {
         llama_kv_cache_seq_cp(ctx, 0, s, -1, -1);
@@ -117,7 +117,7 @@ int main(int argc, char ** argv) {
     llama_batch batch = llama_batch_init(params.n_ctx, 0, W + G + 1);
 
     // target model sampling context
-    struct common_sampler * smpl = common_sampler_init(model, params.sampling);
+    struct llama_sampling_context * ctx_sampling = llama_sampling_init(params.sparams);
 
     // verification n-grams
     std::vector<ngram_data> ngrams_cur(G);
@@ -149,7 +149,7 @@ int main(int argc, char ** argv) {
     }
 
     // here we keep adding new n-grams as we go
-    ngram_container ngrams_observed(llama_vocab_n_tokens(vocab), N, G);
+    ngram_container ngrams_observed(llama_n_vocab(model), N, G);
 
     // debug
     struct llama_kv_cache_view kvc_view = llama_kv_cache_view_init(ctx, W + G + 1);
@@ -158,14 +158,14 @@ int main(int argc, char ** argv) {
 
     // sample first token
     {
-        id = common_sampler_sample(smpl, ctx, 0);
+        id = llama_sampling_sample(ctx_sampling, ctx, NULL, 0);
 
-        common_sampler_accept(smpl, id, true);
+        llama_sampling_accept(ctx_sampling, ctx, id, true);
 
         {
-            const std::string token_str = common_token_to_piece(ctx, id);
+            const std::string token_str = llama_token_to_piece(ctx, id);
 
-            LOG("%s", token_str.c_str());
+            printf("%s", token_str.c_str());
             fflush(stdout);
         }
     }
@@ -174,7 +174,7 @@ int main(int argc, char ** argv) {
         // debug
         if (dump_kv_cache) {
             llama_kv_cache_view_update(ctx, &kvc_view);
-            common_kv_cache_dump_view_seqs(kvc_view, 40);
+            dump_kv_cache_view_seqs(kvc_view, 40);
         }
 
         // build the mask from https://lmsys.org/blog/2023-11-21-lookahead-decoding/
@@ -203,10 +203,10 @@ int main(int argc, char ** argv) {
         //                                                      V  V  V  V  V  V
         //                                                             id
         {
-            common_batch_clear(batch);
+            llama_batch_clear(batch);
 
             // current token - first token of the first level
-            common_batch_add(batch, id, n_past, seq_id_all, true);
+            llama_batch_add(batch, id, n_past, seq_id_all, true);
 
             // verification n-grams - queue this before the lookahead tokens for less KV cache fragmentation
             {
@@ -231,7 +231,7 @@ int main(int argc, char ** argv) {
                         ngrams_cur[g].tokens [j + 1] = t;
                         ngrams_cur[g].i_batch[j + 1] = batch.n_tokens;
 
-                        common_batch_add(batch, t, n_past + j + 1, { W + 1 + g }, true);
+                        llama_batch_add(batch, t, n_past + j + 1, { W + 1 + g }, true);
                     }
                 }
             }
@@ -243,19 +243,19 @@ int main(int argc, char ** argv) {
                     seq_id_look[j] = i + j + 1;
                 }
 
-                common_batch_add(batch, tokens_j[0][i], n_past + i, seq_id_look, false);
+                llama_batch_add(batch, tokens_j[0][i], n_past + i, seq_id_look, false);
             }
 
             // fill the rest of the levels
             for (int j = 1; j < N - 1; j++) {
                 for (int i = 0; i < W; i++) {
-                    common_batch_add(batch, tokens_j[j][i], n_past + j + i, { i + 1 }, j == N - 2);
+                    llama_batch_add(batch, tokens_j[j][i], n_past + j + i, { i + 1 }, j == N - 2);
                 }
             }
         }
 
         if (llama_decode(ctx, batch) != 0) {
-            LOG_ERR("\n\n%s: llama_decode failed - increase KV cache size\n", __func__);
+            fprintf(stderr, "\n\n%s: error: llama_decode failed - increase KV cache size\n", __func__);
             return 1;
         }
 
@@ -283,23 +283,23 @@ int main(int argc, char ** argv) {
             }
 
             // sample the next token
-            id = common_sampler_sample(smpl, ctx, i_batch);
+            id = llama_sampling_sample(ctx_sampling, ctx, NULL, i_batch);
 
-            common_sampler_accept(smpl, id, true);
+            llama_sampling_accept(ctx_sampling, ctx, id, true);
 
             // print
             {
-                const std::string token_str = common_token_to_piece(ctx, id);
+                const std::string token_str = llama_token_to_piece(ctx, id);
 
                 if (v == 0) {
-                    LOG("%s", token_str.c_str());
+                    printf("%s", token_str.c_str());
                 } else {
                     // print light cyan
-                    LOG("\033[0;96m%s\033[0m", token_str.c_str());
+                    printf("\033[0;96m%s\033[0m", token_str.c_str());
                 }
                 fflush(stdout);
 
-                if (llama_vocab_is_eog(vocab, id)) {
+                if (llama_token_is_eog(model, id)) {
                     has_eos = true;
                 }
 
@@ -329,21 +329,21 @@ int main(int argc, char ** argv) {
             // print known n-grams starting with token id (debug)
             if (0 && v == 0) {
                 if (ngrams_observed.cnt[id] > 0) {
-                    LOG("\n - %d n-grams starting with '%s'\n", ngrams_observed.cnt[id], common_token_to_piece(ctx, id).c_str());
+                    printf("\n - %d n-grams starting with '%s'\n", ngrams_observed.cnt[id], llama_token_to_piece(ctx, id).c_str());
                 }
 
                 for (int i = 0; i < ngrams_observed.cnt[id]; i++) {
-                    LOG("   - ngram %2d: ", i);
+                    printf("   - ngram %2d: ", i);
 
                     const int idx = id*(N - 1)*G + i*(N - 1);
 
                     for (int j = 0; j < N - 1; j++) {
-                        const std::string token_str = common_token_to_piece(ctx, ngrams_observed.tokens[idx + j]);
+                        const std::string token_str = llama_token_to_piece(ctx, ngrams_observed.tokens[idx + j]);
 
-                        LOG("%s", token_str.c_str());
+                        printf("%s", token_str.c_str());
                     }
 
-                    LOG("\n");
+                    printf("\n");
                 }
             }
 
@@ -360,7 +360,7 @@ int main(int argc, char ** argv) {
                 if (v == 0) {
                     // sample from the last level
                     for (int i = 0; i < W; i++) {
-                        tokens_j[N - 2][i] = common_sampler_sample(smpl, ctx, ngrams_cur.size()*(N-1) + W*(N - 2) + i);
+                        tokens_j[N - 2][i] = llama_sampling_sample(ctx_sampling, ctx, NULL, ngrams_cur.size()*(N-1) + W*(N - 2) + i);
                     }
                 } else {
                     for (int i = 0; i < W; i++) {
@@ -454,31 +454,32 @@ int main(int argc, char ** argv) {
 
     auto t_dec_end = ggml_time_us();
 
-    LOG("\n\n");
+    LOG_TEE("\n\n");
 
-    LOG_INF("encoded %4d tokens in %8.3f seconds, speed: %8.3f t/s\n", n_input,   (t_enc_end - t_enc_start) / 1e6f, inp.size() / ((t_enc_end - t_enc_start) / 1e6f));
-    LOG_INF("decoded %4d tokens in %8.3f seconds, speed: %8.3f t/s\n", n_predict, (t_dec_end - t_dec_start) / 1e6f, n_predict  / ((t_dec_end - t_dec_start) / 1e6f));
+    LOG_TEE("encoded %4d tokens in %8.3f seconds, speed: %8.3f t/s\n", n_input,   (t_enc_end - t_enc_start) / 1e6f, inp.size() / ((t_enc_end - t_enc_start) / 1e6f));
+    LOG_TEE("decoded %4d tokens in %8.3f seconds, speed: %8.3f t/s\n", n_predict, (t_dec_end - t_dec_start) / 1e6f, n_predict  / ((t_dec_end - t_dec_start) / 1e6f));
 
-    LOG_INF("\n");
-    LOG_INF("W = %2d\n", W);
-    LOG_INF("N = %2d\n", N);
-    LOG_INF("G = %2d\n", G);
-    LOG_INF("\n");
-    LOG_INF("n_predict = %d\n", n_predict);
-    LOG_INF("n_accept  = %d\n", n_accept);
+    LOG_TEE("\n");
+    LOG_TEE("W = %2d\n", W);
+    LOG_TEE("N = %2d\n", N);
+    LOG_TEE("G = %2d\n", G);
+    LOG_TEE("\n");
+    LOG_TEE("n_predict = %d\n", n_predict);
+    LOG_TEE("n_accept  = %d\n", n_accept);
 
-    LOG_INF("\n");
-    common_perf_print(ctx, smpl);
-
-    common_sampler_free(smpl);
+    llama_print_timings(ctx);
 
     llama_kv_cache_view_free(&kvc_view);
+    llama_sampling_free(ctx_sampling);
 
     llama_batch_free(batch);
 
+    llama_free(ctx);
+    llama_free_model(model);
+
     llama_backend_free();
 
-    LOG("\n\n");
+    fprintf(stderr, "\n\n");
 
     return 0;
 }

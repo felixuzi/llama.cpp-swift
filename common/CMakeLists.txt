@@ -1,8 +1,5 @@
 # common
 
-find_package(Threads REQUIRED)
-
-llama_add_compile_flags()
 
 # Build info header
 #
@@ -39,7 +36,7 @@ add_custom_command(
     COMMENT "Generating build details from Git"
     COMMAND ${CMAKE_COMMAND} -DMSVC=${MSVC} -DCMAKE_C_COMPILER_VERSION=${CMAKE_C_COMPILER_VERSION}
             -DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID} -DCMAKE_VS_PLATFORM_NAME=${CMAKE_VS_PLATFORM_NAME}
-            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info-gen-cpp.cmake"
+            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER} -P "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/gen-build-info-cpp.cmake"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build-info.cpp.in" ${GIT_INDEX}
     VERBATIM
@@ -53,27 +50,21 @@ endif()
 set(TARGET common)
 
 add_library(${TARGET} STATIC
-    arg.cpp
-    arg.h
     base64.hpp
-    chat.cpp
-    chat.hpp
-    chat-template.hpp
-    common.cpp
     common.h
-    console.cpp
-    console.h
-    json-schema-to-grammar.cpp
-    json.hpp
-    log.cpp
-    log.h
-    minja.hpp
-    ngram-cache.cpp
-    ngram-cache.h
-    sampling.cpp
+    common.cpp
     sampling.h
-    speculative.cpp
-    speculative.h
+    sampling.cpp
+    console.h
+    console.cpp
+    grammar-parser.h
+    grammar-parser.cpp
+    json.hpp
+    json-schema-to-grammar.cpp
+    train.h
+    train.cpp
+    ngram-cache.h
+    ngram-cache.cpp
     )
 
 if (BUILD_SHARED_LIBS)
@@ -85,12 +76,12 @@ set(LLAMA_COMMON_EXTRA_LIBS build_info)
 # Use curl to download model url
 if (LLAMA_CURL)
     find_package(CURL REQUIRED)
-    target_compile_definitions(${TARGET} PUBLIC LLAMA_USE_CURL)
+    add_definitions(-DLLAMA_USE_CURL)
     include_directories(${CURL_INCLUDE_DIRS})
     find_library(CURL_LIBRARY curl REQUIRED)
     set(LLAMA_COMMON_EXTRA_LIBS ${LLAMA_COMMON_EXTRA_LIBS} ${CURL_LIBRARY})
 endif ()
 
 target_include_directories(${TARGET} PUBLIC .)
-target_compile_features   (${TARGET} PUBLIC cxx_std_17)
-target_link_libraries     (${TARGET} PRIVATE ${LLAMA_COMMON_EXTRA_LIBS} PUBLIC llama Threads::Threads)
+target_compile_features(${TARGET} PUBLIC cxx_std_11)
+target_link_libraries(${TARGET} PRIVATE ${LLAMA_COMMON_EXTRA_LIBS} PUBLIC llama)

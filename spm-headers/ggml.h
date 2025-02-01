@@ -1,1 +1,1 @@
-../ggml/include/ggml.h
+../ggml.h
