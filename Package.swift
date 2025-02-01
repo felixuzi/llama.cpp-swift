@@ -1,14 +1,13 @@
-// swift-tools-version:5.5
-
+// swift-tools-version:5.7
 import PackageDescription
 
 let package = Package(
     name: "llama",
     platforms: [
-        .macOS(.v12w),
-        .iOS(.v14),
-        .watchOS(.v4),
-        .tvOS(.v14)
+        .iOS(.v12),
+        .macOS(.v12),
+        .watchOS(.v7),
+        .tvOS(.v12)
     ],
     products: [
         .library(name: "llama", targets: ["llama"]),
